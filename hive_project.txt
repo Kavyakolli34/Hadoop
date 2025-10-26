@@ -1,0 +1,392 @@
+------Create external tables for each dataset
+
+--hotel_info
+
+CREATE EXTERNAL TABLE hotel_info_ext (
+  hotel_id INT,
+  hotel_name STRING,
+  city STRING,
+  region STRING,
+  star_rating INT,
+  year_opened INT,
+  updated_at TIMESTAMP
+)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY ','
+STORED AS TEXTFILE
+LOCATION '/tmp/DE011025/kavya/travelodge_raw/hotel_info';
+
+--room_inventory
+
+CREATE EXTERNAL TABLE room_inventory_ext (
+  room_id INT,
+  hotel_id INT,
+  room_type STRING,
+  price DECIMAL(10,2),
+  last_updated TIMESTAMP
+)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY ','
+STORED AS TEXTFILE
+LOCATION '/tmp/DE011025/kavya/travelodge_raw/room_inventory';
+
+--customer_info
+
+CREATE EXTERNAL TABLE customer_info_ext (
+  customer_id INT,
+  customer_name STRING,
+  email STRING,
+  phone STRING,
+  registered_date DATE
+)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY ','
+STORED AS TEXTFILE
+LOCATION '/tmp/DE011025/kavya/travelodge_raw/customer_info';
+
+--booking_info
+
+CREATE EXTERNAL TABLE booking_info_ext (
+  booking_id INT,
+  customer_id INT,
+  hotel_id INT,
+  room_id INT,
+  check_in DATE,
+  check_out DATE,
+  booking_status STRING
+)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY ','
+STORED AS TEXTFILE
+LOCATION '/tmp/DE011025/kavya/travelodge_raw/booking_info';
+
+--payment_info
+
+CREATE EXTERNAL TABLE payment_info_ext (
+  payment_id INT,
+  booking_id INT,
+  amount_paid DECIMAL(10,2),
+  payment_date DATE,
+  payment_status STRING,
+  payment_mode STRING,
+  updated_at TIMESTAMP
+)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY ','
+STORED AS TEXTFILE
+LOCATION '/tmp/DE011025/kavya/travelodge_raw/payment_info';
+
+--Verify the tables
+SHOW TABLES;
+SELECT * FROM hotel_info_ext LIMIT 10;
+
+
+
+------------“T” in ELT — the Transformation and Analytics
+
+---Total Revenue per Hotel
+SELECT 
+  h.hotel_name,
+  ROUND(SUM(CASE WHEN p.payment_status = 'success' THEN p.amount_paid ELSE 0 END), 2) AS total_revenue
+FROM booking_info_ext b
+JOIN payment_info_ext p ON b.booking_id = p.booking_id
+JOIN hotel_info_ext h ON b.hotel_id = h.hotel_id
+GROUP BY h.hotel_name
+ORDER BY total_revenue DESC;
+
+---Total Bookings per Hotel
+SELECT 
+  h.hotel_name,
+  COUNT(DISTINCT b.booking_id) AS total_bookings
+FROM booking_info_ext b
+JOIN hotel_info_ext h ON b.hotel_id = h.hotel_id
+GROUP BY h.hotel_name
+ORDER BY total_bookings DESC;
+
+
+
+
+
+
+---Basic Hotel Overview — Revenue & Bookings
+SELECT 
+  hotel_name,
+  COUNT(DISTINCT b.booking_id) AS total_bookings,
+  SUM(CASE WHEN payment_status='success' THEN 1 ELSE 0 END) AS successful_bookings,
+  SUM(CASE WHEN payment_status='failed' THEN 1 ELSE 0 END) AS cancelled_bookings,
+  SUM(CASE WHEN payment_status='pending' THEN 1 ELSE 0 END) AS pending_payments,
+  ROUND(SUM(amount_paid),2) AS total_revenue
+FROM booking_info_ext b
+JOIN payment_info_ext p ON b.booking_id = p.booking_id
+JOIN hotel_info_ext h ON b.hotel_id = h.hotel_id
+GROUP BY h.hotel_name
+ORDER BY total_revenue DESC;
+
+
+---Cancellation & Success Rate %
+
+SELECT 
+  hotel_name,
+  ROUND(100 * SUM(CASE WHEN payment_status='failed' THEN 1 ELSE 0 END) / COUNT(*), 2) AS cancellation_rate_pct,
+  ROUND(100 * SUM(CASE WHEN payment_status='success' THEN 1 ELSE 0 END) / COUNT(*), 2) AS success_rate_pct
+FROM booking_info_ext b
+JOIN payment_info_ext p ON b.booking_id = p.booking_id
+JOIN hotel_info_ext h ON b.hotel_id = h.hotel_id
+GROUP BY h.hotel_name;
+
+---ADR (Average Daily Rate)
+
+SELECT 
+  hotel_name,
+  ROUND(SUM(CASE WHEN payment_status='success' THEN p.amount_paid ELSE 0 END) /
+        NULLIF(SUM(CASE WHEN payment_status='success' THEN 1 ELSE 0 END),0), 2) AS ADR
+FROM booking_info_ext b
+JOIN payment_info_ext p ON b.booking_id = p.booking_id
+JOIN hotel_info_ext h ON b.hotel_id = h.hotel_id
+GROUP BY hotel_name;
+
+--Business Goal(partition by hotel,partition by check-in month (like 2025-10))
+
+CREATE EXTERNAL TABLE booking_info_partitioned (
+  booking_id INT,
+  customer_id INT,
+  room_id INT,
+  check_in DATE,
+  check_out DATE,
+  booking_status STRING
+)
+PARTITIONED BY (
+  hotel_id INT,
+  booking_month STRING
+)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY ','
+STORED AS TEXTFILE
+LOCATION '/tmp/DE011025/kavya/travelodge_raw/booking_partitions/';
+
+ALTER TABLE booking_info_partitioned 
+ADD PARTITION (hotel_id=601, booking_month='2025-10')
+LOCATION '/tmp/DE011025/kavya/travelodge_raw/booking_partitions/hotel_id=601/booking_month=2025-10';
+
+ALTER TABLE booking_info_partitioned 
+ADD PARTITION (hotel_id=602, booking_month='2025-10')
+LOCATION '/tmp/DE011025/kavya/travelodge_raw/booking_partitions/hotel_id=602/booking_month=2025-10';
+
+
+SHOW PARTITIONS booking_info_partitioned;
+
+
+CREATE EXTERNAL TABLE booking_info_bucketed (
+  booking_id INT,
+  customer_id INT,
+  room_id INT,
+  checkin_date STRING,
+  checkout_date STRING,
+  booking_status STRING
+)
+PARTITIONED BY (
+  hotel_id INT,
+  booking_month STRING
+)
+CLUSTERED BY (booking_id) INTO 4 BUCKETS
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY ','
+STORED AS ORC
+LOCATION '/tmp/DE011025/kavya/travelodge_raw/booking_bucketed/';
+
+
+SET hive.enforce.bucketing = true;
+SET hive.exec.dynamic.partition.mode = nonstrict;
+
+
+SET hive.enforce.bucketing = true;
+SET hive.exec.dynamic.partition.mode = nonstrict;
+
+INSERT OVERWRITE TABLE booking_info_bucketed
+PARTITION (hotel_id, booking_month)
+SELECT 
+  booking_id,
+  customer_id,
+  room_id,
+  check_in,       
+  check_out,      
+  booking_status,
+  hotel_id,
+  booking_month
+FROM booking_info_partitioned;
+
+
+SELECT hotel_id, booking_month, COUNT(*) AS total_bookings
+FROM booking_info_bucketed
+GROUP BY hotel_id, booking_month;
+
+
+SELECT hotel_id, COUNT(*) AS total_bookings
+FROM booking_info_partitioned
+GROUP BY hotel_id;
+
+
+---Temporary External Table for Incremental Data
+
+CREATE EXTERNAL TABLE payment_info_incremental (
+  payment_id INT,
+  booking_id INT,
+  payment_status STRING,
+  amount_paid DOUBLE,
+  updated_at TIMESTAMP
+)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY ','
+STORED AS TEXTFILE
+LOCATION '/tmp/DE011025/kavya/travelodge_raw/payment_info_incremental_2025-10-16/';
+
+
+
+----Merge Incremental Data into Main Table
+SET hive.support.concurrency=true;
+SET hive.txn.manager=org.apache.hadoop.hive.ql.lockmgr.DbTxnManager;
+SET hive.compactor.initiator.on=true;
+SET hive.compactor.worker.threads=1;
+
+
+SELECT current_database();
+
+SHOW TABLES;
+
+---- External table in /tmp (raw)
+CREATE EXTERNAL TABLE payment_info_bucketed (
+  payment_id INT,
+  booking_id INT,
+  payment_status STRING,
+  amount_paid DOUBLE,
+  payment_mode STRING,
+  updated_at TIMESTAMP
+)
+CLUSTERED BY (payment_id) INTO 4 BUCKETS
+STORED AS ORC
+LOCATION '/tmp/DE011025/kavya/travelodge_raw/payment_info_bucketed/';
+
+
+-- Managed ACID table (Hive warehouse)
+CREATE TABLE payment_info_txn (
+  payment_id INT,
+  booking_id INT,
+  payment_status STRING,
+  amount_paid DOUBLE,
+  payment_mode STRING,
+  updated_at TIMESTAMP
+)
+CLUSTERED BY (payment_id) INTO 4 BUCKETS
+STORED AS ORC
+TBLPROPERTIES ('transactional'='true');
+
+
+
+-- Move data from /tmp external to managed table
+INSERT INTO TABLE payment_info_txn SELECT * FROM payment_info_ext;
+
+
+DESCRIBE payment_info_txn;
+
+DESCRIBE payment_info_ext;
+
+ALTER TABLE payment_info_txn ADD COLUMNS (payment_date DATE);
+
+INSERT INTO TABLE payment_info_txn
+SELECT
+  payment_id,
+  booking_id,
+  payment_status,
+  amount_paid,
+  payment_mode,
+  updated_at,
+  payment_date
+FROM payment_info_ext;
+
+
+SELECT * FROM payment_info_txn LIMIT 10;
+
+SHOW TBLPROPERTIES payment_info_txn;
+
+
+SELECT COUNT(*) FROM payment_info_txn;
+SELECT * FROM payment_info_txn LIMIT 10;
+
+
+SELECT * FROM payment_info_txn WHERE payment_id = 70060;
+
+
+CREATE EXTERNAL TABLE payment_info_incr_stg (
+  payment_id INT,
+  booking_id INT,
+  amount_paid DECIMAL(10,2),
+  payment_date DATE,
+  payment_status STRING,
+  payment_mode STRING,
+  updated_at TIMESTAMP
+)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY ','
+STORED AS TEXTFILE
+LOCATION '/tmp/DE011025/kavya/travelodge_raw/payment_info_incr';
+
+SELECT * FROM payment_info_incr_stg LIMIT 10;
+
+INSERT INTO TABLE payment_info_txn
+SELECT
+  payment_id,
+  booking_id,
+  payment_status,
+  amount_paid,
+  payment_mode,
+  updated_at,
+  payment_date
+FROM payment_info_ext;
+
+ALTER TABLE payment_info_txn
+CHANGE COLUMN updated_at updated_at TIMESTAMP;
+
+
+INSERT INTO TABLE payment_info_txn
+SELECT * FROM payment_info_incr_stg;
+
+
+CREATE EXTERNAL TABLE IF NOT EXISTS payment_info_incr_stg (
+  payment_id INT,
+  booking_id INT,
+  amount_paid DECIMAL(10,2),
+  payment_date DATE,
+  payment_status STRING,
+  payment_mode STRING,
+  updated_at TIMESTAMP
+)
+ROW FORMAT DELIMITED
+FIELDS TERMINATED BY ','
+STORED AS TEXTFILE
+LOCATION '/tmp/DE011025/kavya/travelodge_raw/payment_info_incr';
+
+SELECT COUNT(*) AS new_records, MAX(updated_at) AS latest_update
+FROM payment_info_incr_stg;
+
+
+INSERT INTO TABLE payment_info_txn
+SELECT * FROM payment_info_incr_stg;
+
+SET hive.strict.timestamp.conversion=false;
+
+INSERT INTO TABLE payment_info_txn
+SELECT
+  payment_id,
+  booking_id,
+  amount_paid,
+  payment_date,
+  payment_status,
+  payment_mode,
+  CAST(updated_at AS TIMESTAMP)
+FROM payment_info_incr_stg;
+
+SELECT COUNT(*), MAX(updated_at)
+FROM payment_info_txn;
+
+SELECT COUNT(*), MAX(updated_at)
+FROM payment_info_txn;
